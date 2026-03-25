@@ -43,6 +43,7 @@ from keras.preprocessing.image import img_to_array
 from keras.preprocessing.image import load_img
 from sklearn.metrics import accuracy_score
 from sklearn.metrics import f1_score
+from sklearn.metrics import roc_auc_score
 
 from utils import *
 
@@ -721,6 +722,10 @@ class PIEIntent(object):
 
             acc = accuracy_score(test_target_data, np.round(test_results))
             f1 = f1_score(test_target_data, np.round(test_results))
+            try:
+                auc = roc_auc_score(test_target_data, test_results)
+            except ValueError:
+                auc = float('nan')
 
             save_results_path = os.path.join(model_path, 'ped_intents.pkl')
             if not os.path.exists(save_results_path):
@@ -730,4 +735,4 @@ class PIEIntent(object):
                            'gt': test_target_data}
                 with open(save_results_path, 'wb') as fid:
                     pickle.dump(results, fid, pickle.HIGHEST_PROTOCOL)
-            return acc, f1
+            return acc, f1, auc
