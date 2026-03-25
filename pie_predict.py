@@ -24,7 +24,7 @@ import numpy as np
 
 from keras.layers import Input, RepeatVector, Dense, Permute
 from keras.layers import Concatenate, Multiply, Dropout
-from keras.layers.recurrent import LSTM
+from keras.layers import LSTM
 from keras.models import Model, load_model
 from keras.callbacks import ReduceLROnPlateau, EarlyStopping, ModelCheckpoint
 from keras.optimizers import RMSprop
