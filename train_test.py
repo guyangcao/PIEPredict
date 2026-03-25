@@ -413,9 +413,11 @@ def main(dataset='pie', train_test=2, batch_size=64,
 
 if __name__ == '__main__':
     parser = argparse.ArgumentParser()
+    parser.add_argument('legacy_train_test', nargs='?', type=int, choices=[0, 1, 2],
+                        help='[Deprecated] 旧版位置参数 1/2 已废弃。请改用 --train_test {0,1,2}。')
     parser.add_argument('--dataset', type=str, default='pie')
     parser.add_argument('--train_test', type=int, default=2,
-                        help='0 - train only, 1 - train and test, 2 - test only')
+                        help='0 - train only, 1 - train and test, 2 - test only. 旧版位置参数 1/2 已废弃。')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Trajectory/speed training batch size. Reduce this if GPU OOM occurs.')
     parser.add_argument('--seeds', type=str, default='42,43,44',
@@ -434,6 +436,11 @@ if __name__ == '__main__':
     parser.add_argument('--eval_output_dir', type=str, default='data/pie/eval_reports')
 
     args = parser.parse_args()
+    if args.legacy_train_test is not None:
+        print('WARNING: Legacy positional argument "{}" is deprecated. '
+              'Please use --train_test {}.'.format(args.legacy_train_test, args.legacy_train_test))
+        args.train_test = args.legacy_train_test
+
     main(dataset=args.dataset,
          train_test=args.train_test,
          batch_size=args.batch_size,
