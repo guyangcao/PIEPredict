@@ -22,13 +22,14 @@ import time
 import pickle
 import numpy as np
 
-from keras.layers import Input, RepeatVector, Dense, Permute
+from keras.layers import Input, RepeatVector, Dense, Permute, Reshape
 from keras.layers import Concatenate, Multiply, Dropout
 from keras.layers import LSTM
 from keras.models import Model, load_model
 from keras.callbacks import ReduceLROnPlateau, EarlyStopping, ModelCheckpoint
 from keras.optimizers import RMSprop
 from keras import regularizers
+from keras import backend as K
 
 class PIEPredict(object):
     """
@@ -66,7 +67,8 @@ class PIEPredict(object):
                  regularizer_val=0.0001,
                  activation='softsign',
                  embed_size=64,
-                 embed_dropout=0):
+                 embed_dropout=0,
+                 num_hypotheses=1):
 
         # Network parameters
         self._num_hidden_units = num_hidden_units
@@ -76,6 +78,7 @@ class PIEPredict(object):
         self._activation = activation
         self._embed_size = embed_size
         self._embed_dropout = embed_dropout
+        self._num_hypotheses = num_hypotheses
 
         # model parameters
         self._observe_length = 15
@@ -263,6 +266,7 @@ class PIEPredict(object):
             fid.write("%s: %s\n" % ('activation', str(self._activation)))
             fid.write("%s: %s\n" % ('embed_size', str(self._embed_size)))
             fid.write("%s: %s\n" % ('embed_dropout', str(self._embed_dropout)))
+            fid.write("%s: %s\n" % ('num_hypotheses', str(self._num_hypotheses)))
 
             fid.write("%s: %s\n" % ('observe_length', str(self._observe_length)))
             fid.write("%s: %s\n" % ('predict_length ', str(self._predict_length)))
@@ -305,6 +309,7 @@ class PIEPredict(object):
 
         print("Number of samples:\n Train: %d \n Val: %d \n"
               % (train_data['enc_input'].shape[0], val_data['enc_input'].shape[0]))
+        print("Training with num_hypotheses (K): %d" % self._num_hypotheses)
 
         self._observe_length = train_data['enc_input'].shape[1]
         self._predict_length = train_data['pred_target'].shape[1]
@@ -357,7 +362,8 @@ class PIEPredict(object):
                      val_data['dec_input']],
                     val_data['pred_target'])
 
-        pie_model.compile(loss=loss, optimizer=optimizer)
+        compile_loss = self.multi_hypothesis_mse if self._num_hypotheses > 1 else loss
+        pie_model.compile(loss=compile_loss, optimizer=optimizer)
 
         print("##############################################")
         print(" Training for predicting sequences of size %d" % self._predict_length)
@@ -416,10 +422,11 @@ class PIEPredict(object):
         test_target_data = test_data['pred_target']
 
         test_results = test_model.predict(test_obs_data, batch_size=2048, verbose=1)
+        test_results_primary = self.select_primary_hypothesis(test_results)
 
         perf = {}
         #  Performance on bounding boxes
-        performance = np.square(test_target_data - test_results)
+        performance = np.square(test_target_data - test_results_primary)
         perf['mse'] = performance.mean(axis=None)
         perf['mse_last'] = performance[:, -1, :].mean(axis=None)
 
@@ -435,13 +442,13 @@ class PIEPredict(object):
             test_obs_data_org = [test_data['enc_input'], test_data['dec_input']]
             test_target_data_org = test_data['pred_target']
 
-            results_org = test_results + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
+            results_org = test_results_primary + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
 
             #  Performance measures for centers
-            res_centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
-            centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
-            for b in range(test_results.shape[0]):
-                for s in range(test_results.shape[1]):
+            res_centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+            centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+            for b in range(test_results_primary.shape[0]):
+                for s in range(test_results_primary.shape[1]):
                     centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
                     centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
                     res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
@@ -562,10 +569,11 @@ class PIEPredict(object):
         int_speed = np.concatenate([int_data, speed_results], axis=2)
         test_results = box_intent_speed_model.predict([box_data['enc_input'], int_speed],
                                                       batch_size=2056, verbose=1)
+        test_results_primary = self.select_primary_hypothesis(test_results)
 
         # Performance measures for bounding boxes
         perf = {}
-        performance = np.square(test_results - box_data['pred_target'])
+        performance = np.square(test_results_primary - box_data['pred_target'])
         perf['mse-15'] = performance[:, 0:15, :].mean(axis=None)
         perf['mse-30'] = performance[:, 0:30, :].mean(axis=None)  # 15:30
         perf['mse-45'] = performance.mean(axis=None)
@@ -583,13 +591,13 @@ class PIEPredict(object):
         test_obs_data_org = [test_data['enc_input'], test_data['dec_input']]
         test_target_data_org = test_data['pred_target']
 
-        results_org = test_results + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
+        results_org = test_results_primary + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
 
         #  Performance measures for centers
-        res_centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
-        centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
-        for b in range(test_results.shape[0]):
-            for s in range(test_results.shape[1]):
+        res_centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+        centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+        for b in range(test_results_primary.shape[0]):
+            for s in range(test_results_primary.shape[1]):
                 centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
                 centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
                 res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
@@ -782,12 +790,13 @@ class PIEPredict(object):
             batch_size=2056,
             verbose=1
         )
+        test_results_primary = self.select_primary_hypothesis(test_results)
     
         # -------------------------
         # 7) Compute metrics
         # -------------------------
         perf = {}
-        performance = np.square(test_results - box_data['pred_target'])
+        performance = np.square(test_results_primary - box_data['pred_target'])
         perf['mse-15'] = performance[:, 0:15, :].mean(axis=None)
         perf['mse-30'] = performance[:, 0:30, :].mean(axis=None)
         perf['mse-45'] = performance.mean(axis=None)
@@ -801,13 +810,13 @@ class PIEPredict(object):
     
         test_obs_data_org = [test_data['enc_input'], test_data['dec_input']]
         test_target_data_org = test_data['pred_target']
-        results_org = test_results + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
+        results_org = test_results_primary + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
     
-        res_centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
-        centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
+        res_centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+        centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
     
-        for b in range(test_results.shape[0]):
-            for s in range(test_results.shape[1]):
+        for b in range(test_results_primary.shape[0]):
+            for s in range(test_results_primary.shape[1]):
                 centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
                 centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
                 res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
@@ -859,15 +868,39 @@ class PIEPredict(object):
         # Initialize the decoder with encoder states
         decoder_output = decoder_model(decoder_concat_inputs,
                                        initial_state=_encoder_states)
-        decoder_output = Dense(self._prediction_size,
-                               activation='linear',
-                               name='decoder_dense')(decoder_output)
+        if self._num_hypotheses > 1:
+            decoder_output = Dense(self._num_hypotheses * self._prediction_size,
+                                   activation='linear',
+                                   name='decoder_dense')(decoder_output)
+            decoder_output = Reshape((self._predict_length,
+                                      self._num_hypotheses,
+                                      self._prediction_size),
+                                     name='traj_reshape')(decoder_output)
+            decoder_output = Permute((2, 1, 3), name='traj_pred')(decoder_output)
+        else:
+            decoder_output = Dense(self._prediction_size,
+                                   activation='linear',
+                                   name='decoder_dense')(decoder_output)
 
         net_model = Model(inputs=[_encoder_input, _decoder_input],
                           outputs=decoder_output)
         net_model.summary()
 
         return net_model
+
+    @staticmethod
+    def select_primary_hypothesis(predictions):
+        if len(predictions.shape) == 4:
+            return predictions[:, 0, :, :]
+        return predictions
+
+    @staticmethod
+    def multi_hypothesis_mse(y_true, y_pred):
+        y_true_expanded = K.expand_dims(y_true, axis=1)
+        sq_error = K.square(y_pred - y_true_expanded)
+        per_hypothesis_mse = K.mean(sq_error, axis=[2, 3])
+        best_hypothesis_mse = K.min(per_hypothesis_mse, axis=1)
+        return K.mean(best_hypothesis_mse)
 
     def create_lstm_model(self, name='lstm', r_state=True, r_sequence=True):
         """

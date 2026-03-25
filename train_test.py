@@ -20,6 +20,7 @@ limitations under the License.
 
 import os
 import sys
+import argparse
 
 from pie_intent import PIEIntent
 from pie_predict import PIEPredict
@@ -35,8 +36,10 @@ dim_ordering = K.image_dim_ordering()
 
 
 def train_predict(dataset='pie',
-                  train_test=2, 
-                  intent_model_path='data/pie/intention/context_loc_pretrained'):
+                  train_test=2,
+                  intent_model_path='data/pie/intention/context_loc_pretrained',
+                  num_hypotheses=5,
+                  batch_size=64):
     data_opts = {'fstride': 1,
                  'sample_type': 'all',
                  'height_rng': [0, float('inf')],
@@ -49,7 +52,8 @@ def train_predict(dataset='pie',
                                  'regen_data': True},
                  'kfold_params': {'num_folds': 5, 'fold': 1}}
 
-    t = PIEPredict()
+    t_traj = PIEPredict(num_hypotheses=num_hypotheses)
+    t_speed = PIEPredict()
     pie_path = os.environ.copy()['PIE_PATH']
 
     if dataset == 'pie':
@@ -79,16 +83,16 @@ def train_predict(dataset='pie',
     if train_test < 2:
         beh_seq_val = imdb.generate_data_trajectory_sequence('val', **data_opts)
         beh_seq_train = imdb.generate_data_trajectory_sequence('train', **data_opts)
-        traj_model_path = t.train(beh_seq_train, beh_seq_val, **traj_model_opts)
-        speed_model_path = t.train(beh_seq_train, beh_seq_val, **speed_model_opts)
+        traj_model_path = t_traj.train(beh_seq_train, beh_seq_val, batch_size=batch_size, **traj_model_opts)
+        speed_model_path = t_speed.train(beh_seq_train, beh_seq_val, batch_size=batch_size, **speed_model_opts)
 
     if train_test > 0:
         beh_seq_test = imdb.generate_data_trajectory_sequence('test', **data_opts)
 
-        perf_final = t.test_final(beh_seq_test,
-                                  traj_model_path=traj_model_path, 
-                                  speed_model_path=speed_model_path,
-                                  intent_model_path=intent_model_path)
+        perf_final = t_traj.test_final(beh_seq_test,
+                                       traj_model_path=traj_model_path,
+                                       speed_model_path=speed_model_path,
+                                       intent_model_path=intent_model_path)
 
         t = PrettyTable(['MSE', 'C_MSE'])
         t.title = 'Trajectory prediction model (loc + PIE_intent + PIE_speed)'
@@ -167,16 +171,29 @@ def train_intent(train_test=1):
         tf.reset_default_graph()
         return saved_files_path
 
-def main(dataset='pie', train_test=2):
+def main(dataset='pie', train_test=2, num_hypotheses=5, batch_size=64):
 
       intent_model_path = train_intent(train_test=train_test)
-      train_predict(dataset=dataset, train_test=train_test, intent_model_path=intent_model_path)
+      print('Trajectory num_hypotheses (K): {}'.format(num_hypotheses))
+      train_predict(dataset=dataset,
+                    train_test=train_test,
+                    intent_model_path=intent_model_path,
+                    num_hypotheses=num_hypotheses,
+                    batch_size=batch_size)
 
 
 if __name__ == '__main__':
-    try:
-        train_test = int(sys.argv[1])
-        main(train_test=train_test)
-    except ValueError:
-        raise ValueError('Usage: python train_test.py <train_test>\n'
-                         'train_test: 0 - train only, 1 - train and test, 2 - test only\n')
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--dataset', type=str, default='pie')
+    parser.add_argument('--train_test', type=int, default=2,
+                        help='0 - train only, 1 - train and test, 2 - test only')
+    parser.add_argument('--num_hypotheses', type=int, default=5, choices=[5, 10],
+                        help='Number of trajectory hypotheses (K). Use K=5 by default to reduce OOM risk.')
+    parser.add_argument('--batch_size', type=int, default=64,
+                        help='Trajectory/speed training batch size. Reduce this if GPU OOM occurs.')
+
+    args = parser.parse_args()
+    main(dataset=args.dataset,
+         train_test=args.train_test,
+         num_hypotheses=args.num_hypotheses,
+         batch_size=args.batch_size)
