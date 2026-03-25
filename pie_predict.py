@@ -68,7 +68,9 @@ class PIEPredict(object):
                  activation='softsign',
                  embed_size=64,
                  embed_dropout=0,
-                 num_hypotheses=1):
+                 num_hypotheses=1,
+                 lambda_intent=1.0,
+                 lambda_traj=1.0):
 
         # Network parameters
         self._num_hidden_units = num_hidden_units
@@ -79,6 +81,8 @@ class PIEPredict(object):
         self._embed_size = embed_size
         self._embed_dropout = embed_dropout
         self._num_hypotheses = num_hypotheses
+        self._lambda_intent = lambda_intent
+        self._lambda_traj = lambda_traj
 
         # model parameters
         self._observe_length = 15
@@ -267,6 +271,8 @@ class PIEPredict(object):
             fid.write("%s: %s\n" % ('embed_size', str(self._embed_size)))
             fid.write("%s: %s\n" % ('embed_dropout', str(self._embed_dropout)))
             fid.write("%s: %s\n" % ('num_hypotheses', str(self._num_hypotheses)))
+            fid.write("%s: %s\n" % ('lambda_intent', str(self._lambda_intent)))
+            fid.write("%s: %s\n" % ('lambda_traj', str(self._lambda_traj)))
 
             fid.write("%s: %s\n" % ('observe_length', str(self._observe_length)))
             fid.write("%s: %s\n" % ('predict_length ', str(self._predict_length)))
@@ -362,8 +368,12 @@ class PIEPredict(object):
                      val_data['dec_input']],
                     val_data['pred_target'])
 
-        compile_loss = self.multi_hypothesis_mse if self._num_hypotheses > 1 else loss
-        pie_model.compile(loss=compile_loss, optimizer=optimizer)
+        compile_loss = self.total_training_loss
+        pie_model.compile(loss=compile_loss,
+                          optimizer=optimizer,
+                          metrics=[self.intent_loss_metric,
+                                   self.best_of_k_trajectory_loss,
+                                   self.total_loss_metric])
 
         print("##############################################")
         print(" Training for predicting sequences of size %d" % self._predict_length)
@@ -408,7 +418,7 @@ class PIEPredict(object):
         :param model_path: The path to where the model to be tested is saved
         :return: Mean squared error (MSE) of the prediction
         """
-        test_model = load_model(os.path.join(model_path, 'model.h5'))
+        test_model = load_model(os.path.join(model_path, 'model.h5'), compile=False)
         test_model.summary()
 
         with open(os.path.join(model_path, 'model_opts.pkl'), 'rb') as fid:
@@ -553,7 +563,8 @@ class PIEPredict(object):
         speed_model = load_model(os.path.join(speed_model_path, 'model.h5'))
 
         #bis_path = '/home/aras/PycharmProjects/release_code/test/box_intent_speed'
-        box_intent_speed_model = load_model(os.path.join(traj_model_path, 'model.h5'))
+        box_intent_speed_model = load_model(os.path.join(traj_model_path, 'model.h5'),
+                                            compile=False)
 
         ################## run speed model ####################
         model_opts['enc_input_type'] = ['obd_speed']
@@ -896,11 +907,48 @@ class PIEPredict(object):
 
     @staticmethod
     def multi_hypothesis_mse(y_true, y_pred):
+        return PIEPredict.best_of_k_trajectory_loss(y_true, y_pred)
+
+    @staticmethod
+    def _ensure_hypothesis_dim(y_pred):
+        if K.ndim(y_pred) == 3:
+            return K.expand_dims(y_pred, axis=1)
+        return y_pred
+
+    @staticmethod
+    def _per_hypothesis_error(y_true, y_pred):
+        """
+        Computes per-sample, per-hypothesis trajectory error:
+          1) MSE on each timestep feature vector
+          2) Sum on time dimension
+        Returns tensor of shape [batch, K]
+        """
+        y_pred = PIEPredict._ensure_hypothesis_dim(y_pred)
         y_true_expanded = K.expand_dims(y_true, axis=1)
         sq_error = K.square(y_pred - y_true_expanded)
-        per_hypothesis_mse = K.mean(sq_error, axis=[2, 3])
-        best_hypothesis_mse = K.min(per_hypothesis_mse, axis=1)
-        return K.mean(best_hypothesis_mse)
+        step_mse = K.mean(sq_error, axis=3)
+        return K.sum(step_mse, axis=2)
+
+    @staticmethod
+    def best_of_k_trajectory_loss(y_true, y_pred):
+        per_hypothesis_error = PIEPredict._per_hypothesis_error(y_true, y_pred)
+        best_error = K.min(per_hypothesis_error, axis=1)
+        return K.mean(best_error)
+
+    @staticmethod
+    def intent_loss_metric(y_true, y_pred):
+        # Trajectory model currently has no intention output head.
+        # Keep metric explicit for logging consistency in joint-loss training.
+        return K.constant(0.0)
+
+    @staticmethod
+    def total_loss_metric(y_true, y_pred):
+        return PIEPredict.best_of_k_trajectory_loss(y_true, y_pred)
+
+    def total_training_loss(self, y_true, y_pred):
+        l_intent = self.intent_loss_metric(y_true, y_pred)
+        l_bok = self.best_of_k_trajectory_loss(y_true, y_pred)
+        return self._lambda_intent * l_intent + self._lambda_traj * l_bok
 
     def create_lstm_model(self, name='lstm', r_state=True, r_sequence=True):
         """
