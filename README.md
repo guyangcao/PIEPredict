@@ -126,6 +126,24 @@ data/pie/eval_reports/<protocol>/
     evaluation_summary_mean_std.json
 ```
 
+
+### Week 4 report checklist (minimal reproducible format)
+
+Use `docs/week4_report_minimum_template.md` as the mandatory structure for weekly reporting, including:
+
+- Baseline reproduction
+- Multi-future method description with Best-of-K
+- Quantitative table (`F1/AUC + minADE/minFDE`)
+- Qualitative figure under same history with `K` futures
+- 2-3 failure cases (occlusion/intersection/hesitation)
+- Explicit next steps (`π_k` and intent-trajectory consistency loss)
+
+To avoid manual transcription errors, validate your canonical CSV files before writing the report:
+
+```bash
+python scripts/validate_report_traceability.py   --summary-csv data/pie/eval_reports/<protocol>/evaluation_summary.csv   --mean-std-csv data/pie/eval_reports/<protocol>/evaluation_summary_mean_std.csv
+```
+
 <a name="test"></a>
 ## Test
 
