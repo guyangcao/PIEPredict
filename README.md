@@ -86,6 +86,46 @@ _Note: training intention model uses image data and requires 32GB RAM.
 
 Due to the random initialization of the networks and minor changes to the annotations there might be slight variation in the results.
 
+### Reproducible experiment protocol (quick + formal)
+
+To reduce variance and make experiments repeatable, `train_test.py` now supports:
+
+1. **Fixed seed sets** (default: `42,43,44`)
+2. **Fixed experiment matrix** (default: `K=1,5,10`)
+3. **Two evaluation protocols**
+   - **quick**: reproducible subset on `val` split (`max_tracks=512` by default), for fast iteration
+   - **formal**: full `test` split, for final reporting
+
+Recommended commands:
+
+```bash
+# Quick reproducible pass (small subset)
+python train_test.py --train_test 2 --protocol quick --seeds 42,43,44 --ks 1,5,10
+
+# Formal final evaluation (full test split)
+python train_test.py --train_test 2 --protocol formal --seeds 42,43,44 --ks 1,5,10
+```
+
+For each `(seed, K)` run, artifacts are stored under:
+
+```
+data/pie/eval_reports/<protocol>/K{K}_seed{seed}/
+    config_snapshot.json
+    metrics.json
+    checkpoint_manifest.json
+    best_checkpoints/
+```
+
+Aggregate outputs are written to:
+
+```
+data/pie/eval_reports/<protocol>/
+    evaluation_summary.csv              # all runs
+    evaluation_summary.json
+    evaluation_summary_mean_std.csv     # mean/std across seeds
+    evaluation_summary_mean_std.json
+```
+
 <a name="test"></a>
 ## Test
 
