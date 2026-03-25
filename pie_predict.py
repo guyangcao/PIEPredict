@@ -629,6 +629,198 @@ class PIEPredict(object):
                 pickle.dump(results, fid, pickle.HIGHEST_PROTOCOL)
         return perf  # performance
 
+    
+    def test_final_manual(self, data_test,
+                          traj_model_path='data/pie/trajectory/loc_intent_speed_pretrained',
+                          intent_model_path='data/pie/intention/context_loc_pretrained',
+                          speed_model_path='data/pie/speed/speed_pretrained'):
+        # -------------------------
+        # 1) Load saved intention predictions
+        # -------------------------
+        intent_path = os.path.join(intent_model_path, 'ped_intents.pkl')
+        with open(intent_path, 'rb') as fid:
+            try:
+                intent = pickle.load(fid)
+            except:
+                intent = pickle.load(fid, encoding='bytes')
+    
+        # -------------------------
+        # 2) Prepare bbox-based test data
+        # -------------------------
+        model_opts = {
+            'normalize_bbox': True,
+            'track_overlap': 0.5,
+            'observe_length': 15,
+            'predict_length': 45,
+            'enc_input_type': ['bbox'],
+            'dec_input_type': [],
+            'prediction_type': ['bbox']
+        }
+    
+        box_runner = PIEPredict()
+        box_data = box_runner.get_data(data_test, **model_opts)
+    
+        # -------------------------
+        # 3) Build intention lookup table
+        # -------------------------
+        intent_dic = {}
+        for pid, img, r in zip(intent['ped_id'], intent['images'], intent['results']):
+            img_name = img[0].split('/')[-1].split('.')[0]
+            p_id = pid[0][0]
+            if p_id in intent_dic:
+                intent_dic[p_id][img_name] = r
+            else:
+                intent_dic[p_id] = {img_name: r}
+    
+        int_data = np.zeros(
+            shape=(box_data['pred_target'].shape[0],
+                   box_data['pred_target'].shape[1],
+                   1)
+        )
+    
+        obs_pids = box_data['obs_pid']
+        obs_images = box_data['obs_image']
+    
+        intent_list = []
+        last_ped = ''
+        for i in range(len(obs_pids)):
+            pid = obs_pids[i][0][0]
+            if pid != last_ped:
+                intent_list = []
+                last_ped = pid
+    
+            if pid in intent_dic:
+                img_name = obs_images[i][0].split('/')[-1].split('.')[0]
+                if img_name in intent_dic[pid]:
+                    intent_result = intent_dic[pid][img_name]
+                    intent_result = float(np.squeeze(intent_result))
+                    intent_list.append(intent_result)
+                    int_data[i] = np.full((box_data['pred_target'].shape[1], 1), intent_result)
+                else:
+                    if intent_list == []:
+                        int_data[i] = np.full((box_data['pred_target'].shape[1], 1), 0.5)
+                    else:
+                        int_avg = float(np.mean(np.array(intent_list)))
+                        int_data[i] = np.full((box_data['pred_target'].shape[1], 1), int_avg)
+            else:
+                int_data[i] = np.full((box_data['pred_target'].shape[1], 1), 0.5)
+                
+        # -------------------------
+        # 4) Build + load speed model from source
+        # -------------------------
+        with open(os.path.join(speed_model_path, 'model_opts.pkl'), 'rb') as fid:
+            try:
+                speed_opts = pickle.load(fid)
+            except:
+                speed_opts = pickle.load(fid, encoding='bytes')
+    
+        speed_runner = PIEPredict()
+        speed_data = speed_runner.get_data(data_test, **speed_opts)
+    
+        speed_runner._observe_length = speed_data['enc_input'].shape[1]
+        speed_runner._predict_length = speed_data['pred_target'].shape[1]
+        speed_runner._encoder_feature_size = speed_data['enc_input'].shape[2]
+        speed_runner._decoder_feature_size = speed_data['dec_input'].shape[2]
+        speed_runner._prediction_size = speed_data['pred_target'].shape[2]
+    
+        speed_model = speed_runner.pie_encdec()
+        speed_model.load_weights(os.path.join(speed_model_path, 'model.h5'))
+    
+        speed_results = speed_model.predict(
+            [speed_data['enc_input'], speed_data['dec_input']],
+            batch_size=2056,
+            verbose=1
+        )
+    
+        # -------------------------
+        # 5) Build + load trajectory model from source
+        # -------------------------
+        with open(os.path.join(traj_model_path, 'model_opts.pkl'), 'rb') as fid:
+            try:
+                traj_opts = pickle.load(fid)
+            except:
+                traj_opts = pickle.load(fid, encoding='bytes')
+    
+        traj_opts = dict(traj_opts)
+    
+        # Patch legacy option name: old configs use 'intent', current dataset uses 'intention_prob'
+        if 'dec_input_type' in traj_opts:
+            traj_opts['dec_input_type'] = [
+                'intention_prob' if x == 'intent' else x
+                for x in traj_opts['dec_input_type']
+            ]
+        if 'enc_input_type' in traj_opts:
+            traj_opts['enc_input_type'] = [
+                'intention_prob' if x == 'intent' else x
+                for x in traj_opts['enc_input_type']
+            ]
+        if 'prediction_type' in traj_opts:
+            traj_opts['prediction_type'] = [
+                'intention_prob' if x == 'intent' else x
+                for x in traj_opts['prediction_type']
+            ]
+    
+        traj_runner = PIEPredict()
+        traj_data = traj_runner.get_data(data_test, **traj_opts)
+    
+        traj_runner._observe_length = traj_data['enc_input'].shape[1]
+        traj_runner._predict_length = traj_data['pred_target'].shape[1]
+        traj_runner._encoder_feature_size = traj_data['enc_input'].shape[2]
+        traj_runner._decoder_feature_size = traj_data['dec_input'].shape[2]
+        traj_runner._prediction_size = traj_data['pred_target'].shape[2]
+    
+        traj_model = traj_runner.pie_encdec()
+        traj_model.load_weights(os.path.join(traj_model_path, 'model.h5'))
+    
+        # -------------------------
+        # 6) Run final prediction
+        # -------------------------
+        int_speed = np.concatenate([int_data, speed_results], axis=2)
+    
+        test_results = traj_model.predict(
+            [box_data['enc_input'], int_speed],
+            batch_size=2056,
+            verbose=1
+        )
+    
+        # -------------------------
+        # 7) Compute metrics
+        # -------------------------
+        perf = {}
+        performance = np.square(test_results - box_data['pred_target'])
+        perf['mse-15'] = performance[:, 0:15, :].mean(axis=None)
+        perf['mse-30'] = performance[:, 0:30, :].mean(axis=None)
+        perf['mse-45'] = performance.mean(axis=None)
+        perf['mse-last'] = performance[:, -1, :].mean(axis=None)
+    
+        # Center displacement metrics
+        model_opts['normalize_bbox'] = False
+        model_opts['enc_input_type'] = ['bbox']
+        model_opts['prediction_type'] = ['bbox']
+        test_data = box_runner.get_data(data_test, **model_opts)
+    
+        test_obs_data_org = [test_data['enc_input'], test_data['dec_input']]
+        test_target_data_org = test_data['pred_target']
+        results_org = test_results + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
+    
+        res_centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
+        centers = np.zeros(shape=(test_results.shape[0], test_results.shape[1], 2))
+    
+        for b in range(test_results.shape[0]):
+            for s in range(test_results.shape[1]):
+                centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
+                centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
+                res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
+                res_centers[b, s, 1] = (results_org[b, s, 3] + results_org[b, s, 1]) / 2
+    
+        c_performance = np.square(centers - res_centers)
+        perf['c-mse-15'] = c_performance[:, 0:15, :].mean(axis=None)
+        perf['c-mse-30'] = c_performance[:, 0:30, :].mean(axis=None)
+        perf['c-mse-45'] = c_performance.mean(axis=None)
+        perf['c-mse-last'] = c_performance[:, -1, :].mean(axis=None)
+    
+        return perf, test_results, box_data
+
     def pie_encdec(self):
         """
         Generates the encoder decoder method
