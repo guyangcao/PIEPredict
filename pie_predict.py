@@ -563,7 +563,8 @@ class PIEPredict(object):
                 int_data[i] = np.array([[0.5]] * box_data['pred_target'].shape[1])
 
         #speed_path = '/home/aras/PycharmProjects/release_code/test/speed_models/pie_speed'
-        speed_model = load_model(os.path.join(speed_model_path, 'model.h5'))
+        speed_model = load_model(os.path.join(speed_model_path, 'model.h5'),
+                                 compile=False)
 
         #bis_path = '/home/aras/PycharmProjects/release_code/test/box_intent_speed'
         box_intent_speed_model = load_model(os.path.join(traj_model_path, 'model.h5'),
@@ -585,18 +586,6 @@ class PIEPredict(object):
                                                       batch_size=2056, verbose=1)
         test_results_primary = self.select_primary_hypothesis(test_results)
 
-        # Performance measures for bounding boxes
-        perf = {}
-        performance = np.square(test_results_primary - box_data['pred_target'])
-        perf['mse-15'] = performance[:, 0:15, :].mean(axis=None)
-        perf['mse-30'] = performance[:, 0:30, :].mean(axis=None)  # 15:30
-        perf['mse-45'] = performance.mean(axis=None)
-        perf['mse-last'] = performance[:, -1, :].mean(axis=None)
-
-        # print("mse-15: %.2f\nmse-30: %.2f\nmse-45: %.2f"
-        #       % (perf['mse-15'], perf['mse-30'], perf['mse-45']))
-        # print("mse-last %.2f\n" % (perf['mse-last']))
-
         #  Performance on centers (displacement)
         model_opts['normalize_bbox'] = False
         model_opts['enc_input_type'] = ['bbox']
@@ -604,30 +593,11 @@ class PIEPredict(object):
         test_data = self.get_data(data_test, **model_opts)
         test_obs_data_org = [test_data['enc_input'], test_data['dec_input']]
         test_target_data_org = test_data['pred_target']
-
-        results_org = test_results_primary + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
-
-        #  Performance measures for centers
-        res_centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
-        centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
-        for b in range(test_results_primary.shape[0]):
-            for s in range(test_results_primary.shape[1]):
-                centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
-                centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
-                res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
-                res_centers[b, s, 1] = (results_org[b, s, 3] + results_org[b, s, 1]) / 2
-
-        c_performance = np.square(centers - res_centers)
-        perf['c-mse-15'] = c_performance[:, 0:15, :].mean(axis=None)
-        perf['c-mse-30'] = c_performance[:, 0:30, :].mean(axis=None)  # 0:30
-        perf['c-mse-45'] = c_performance.mean(axis=None)
-        perf['c-mse-last'] = c_performance[:, -1, :].mean(axis=None)
-        center_dist = np.linalg.norm(centers - res_centers, axis=2)
-        perf['ade'] = center_dist.mean(axis=None)
-        perf['fde'] = center_dist[:, -1].mean(axis=None)
-        perf.update(self.compute_multi_hypothesis_metrics(test_results,
-                                                          test_target_data_org,
-                                                          test_obs_data_org[0][:, 0, 0:4]))
+        perf = self._build_perf_dict(test_results_primary=test_results_primary,
+                                     test_results=test_results,
+                                     pred_target=box_data['pred_target'],
+                                     test_target_data_org=test_target_data_org,
+                                     obs_bbox_anchor=test_obs_data_org[0][:, 0, 0:4])
 
         # print("c-mse-15: %.2f\nc-mse-30: %.2f\nc-mse-45: %.2f" \
         #       % (perf['c-mse-15'], perf['c-mse-30'], perf['c-mse-45']))
@@ -812,55 +782,104 @@ class PIEPredict(object):
         )
         test_results_primary = self.select_primary_hypothesis(test_results)
     
-        # -------------------------
-        # 7) Compute metrics
-        # -------------------------
-        perf = {}
-        performance = np.square(test_results_primary - box_data['pred_target'])
-        perf['mse-15'] = performance[:, 0:15, :].mean(axis=None)
-        perf['mse-30'] = performance[:, 0:30, :].mean(axis=None)
-        perf['mse-45'] = performance.mean(axis=None)
-        perf['mse-last'] = performance[:, -1, :].mean(axis=None)
-    
         # Center displacement metrics
         model_opts['normalize_bbox'] = False
         model_opts['enc_input_type'] = ['bbox']
         model_opts['prediction_type'] = ['bbox']
         test_data = box_runner.get_data(data_test, **model_opts)
-    
+
         test_obs_data_org = [test_data['enc_input'], test_data['dec_input']]
         test_target_data_org = test_data['pred_target']
-        results_org = test_results_primary + np.expand_dims(test_obs_data_org[0][:, 0, 0:4], axis=1)
-    
-        res_centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
-        centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
-    
-        for b in range(test_results_primary.shape[0]):
-            for s in range(test_results_primary.shape[1]):
-                centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
-                centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
-                res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
-                res_centers[b, s, 1] = (results_org[b, s, 3] + results_org[b, s, 1]) / 2
-    
-        c_performance = np.square(centers - res_centers)
-        perf['c-mse-15'] = c_performance[:, 0:15, :].mean(axis=None)
-        perf['c-mse-30'] = c_performance[:, 0:30, :].mean(axis=None)
-        perf['c-mse-45'] = c_performance.mean(axis=None)
-        perf['c-mse-last'] = c_performance[:, -1, :].mean(axis=None)
-        center_dist = np.linalg.norm(centers - res_centers, axis=2)
-        perf['ade'] = center_dist.mean(axis=None)
-        perf['fde'] = center_dist[:, -1].mean(axis=None)
-        perf.update(self.compute_multi_hypothesis_metrics(test_results,
-                                                          test_target_data_org,
-                                                          test_obs_data_org[0][:, 0, 0:4]))
-    
+        perf = self._build_perf_dict(test_results_primary=test_results_primary,
+                                     test_results=test_results,
+                                     pred_target=box_data['pred_target'],
+                                     test_target_data_org=test_target_data_org,
+                                     obs_bbox_anchor=test_obs_data_org[0][:, 0, 0:4])
+
         return perf, test_results, box_data
+
+    def _build_perf_dict(self, test_results_primary, test_results,
+                         pred_target, test_target_data_org, obs_bbox_anchor):
+        perf = {
+            'mse-15': None,
+            'mse-30': None,
+            'mse-45': None,
+            'mse-last': None,
+            'c-mse-15': None,
+            'c-mse-30': None,
+            'c-mse-45': None,
+            'c-mse-last': None,
+            'ade': None,
+            'fde': None,
+            'minADE': None,
+            'minFDE': None
+        }
+
+        try:
+            performance = np.square(test_results_primary - pred_target)
+            perf['mse-15'] = performance[:, 0:15, :].mean(axis=None)
+            perf['mse-30'] = performance[:, 0:30, :].mean(axis=None)
+            perf['mse-45'] = performance.mean(axis=None)
+            perf['mse-last'] = performance[:, -1, :].mean(axis=None)
+        except Exception:
+            pass
+
+        try:
+            results_org = test_results_primary + np.expand_dims(obs_bbox_anchor, axis=1)
+            res_centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+            centers = np.zeros(shape=(test_results_primary.shape[0], test_results_primary.shape[1], 2))
+
+            for b in range(test_results_primary.shape[0]):
+                for s in range(test_results_primary.shape[1]):
+                    centers[b, s, 0] = (test_target_data_org[b, s, 2] + test_target_data_org[b, s, 0]) / 2
+                    centers[b, s, 1] = (test_target_data_org[b, s, 3] + test_target_data_org[b, s, 1]) / 2
+                    res_centers[b, s, 0] = (results_org[b, s, 2] + results_org[b, s, 0]) / 2
+                    res_centers[b, s, 1] = (results_org[b, s, 3] + results_org[b, s, 1]) / 2
+
+            c_performance = np.square(centers - res_centers)
+            perf['c-mse-15'] = c_performance[:, 0:15, :].mean(axis=None)
+            perf['c-mse-30'] = c_performance[:, 0:30, :].mean(axis=None)
+            perf['c-mse-45'] = c_performance.mean(axis=None)
+            perf['c-mse-last'] = c_performance[:, -1, :].mean(axis=None)
+            center_dist = np.linalg.norm(centers - res_centers, axis=2)
+            perf['ade'] = center_dist.mean(axis=None)
+            perf['fde'] = center_dist[:, -1].mean(axis=None)
+        except Exception:
+            pass
+
+        try:
+            perf.update(self.compute_multi_hypothesis_metrics(test_results,
+                                                              test_target_data_org,
+                                                              obs_bbox_anchor))
+        except Exception:
+            pass
+        return perf
 
     @staticmethod
     def compute_multi_hypothesis_metrics(predictions, gt_bbox_abs, obs_bbox_anchor):
         pred = predictions
+        if pred.ndim not in (3, 4):
+            raise ValueError('`predictions` must have 3 or 4 dimensions, got shape {}'.format(pred.shape))
+        if gt_bbox_abs.ndim != 3:
+            raise ValueError('`gt_bbox_abs` must be a 3D tensor [B, T, 4], got shape {}'.format(gt_bbox_abs.shape))
+        if obs_bbox_anchor.ndim != 2:
+            raise ValueError('`obs_bbox_anchor` must be a 2D tensor [B, 4], got shape {}'.format(obs_bbox_anchor.shape))
+
         if pred.ndim == 3:
             pred = np.expand_dims(pred, axis=1)
+
+        if pred.shape[0] != gt_bbox_abs.shape[0]:
+            raise ValueError('Batch mismatch: predictions batch {} != gt batch {}'
+                             .format(pred.shape[0], gt_bbox_abs.shape[0]))
+        if pred.shape[2] != gt_bbox_abs.shape[1]:
+            raise ValueError('Time mismatch: predictions horizon {} != gt horizon {}'
+                             .format(pred.shape[2], gt_bbox_abs.shape[1]))
+        if pred.shape[3] != 4 or gt_bbox_abs.shape[2] != 4 or obs_bbox_anchor.shape[1] != 4:
+            raise ValueError('Expected last bbox dimension to be 4. Got pred {}, gt {}, anchor {}'
+                             .format(pred.shape[3], gt_bbox_abs.shape[2], obs_bbox_anchor.shape[1]))
+        if obs_bbox_anchor.shape[0] != pred.shape[0]:
+            raise ValueError('Anchor batch mismatch: obs batch {} != pred batch {}'
+                             .format(obs_bbox_anchor.shape[0], pred.shape[0]))
 
         pred_abs = pred + obs_bbox_anchor[:, None, None, :]
         gt_centers = np.stack([(gt_bbox_abs[:, :, 0] + gt_bbox_abs[:, :, 2]) * 0.5,

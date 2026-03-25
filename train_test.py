@@ -225,14 +225,21 @@ def train_predict(dataset='pie',
                                        speed_model_path=speed_model_path,
                                        intent_model_path=intent_model_path)
 
+        required_perf_keys = ['mse-45', 'c-mse-45', 'ade', 'fde', 'minADE', 'minFDE']
+        for metric_key in required_perf_keys:
+            if metric_key not in perf_final:
+                print('WARNING: Missing metric "{}" from test_final output. '
+                      'Filling with None for stable CSV/report output.'.format(metric_key))
+                perf_final[metric_key] = None
+
         t = PrettyTable(['MSE', 'C_MSE', 'ADE', 'FDE', 'minADE', 'minFDE'])
         t.title = 'Trajectory prediction model (loc + PIE_intent + PIE_speed)'
         t.add_row([perf_final['mse-45'],
                    perf_final['c-mse-45'],
-                   perf_final.get('ade'),
-                   perf_final.get('fde'),
-                   perf_final.get('minADE'),
-                   perf_final.get('minFDE')])
+                   perf_final['ade'],
+                   perf_final['fde'],
+                   perf_final['minADE'],
+                   perf_final['minFDE']])
         
         print(t)
         return perf_final
