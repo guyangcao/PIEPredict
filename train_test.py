@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import random
+import re
 import shutil
 import numpy as np
 
@@ -88,12 +89,31 @@ def copy_if_exists(src, dst):
     return False
 
 
-def save_run_artifacts(run_dir, run_config, run_metrics, intent_model_path, speed_model_path, traj_model_path):
+def read_num_hypotheses_from_model(traj_model_path):
+    if not traj_model_path:
+        return None
+    config_path = os.path.join(traj_model_path, 'configs.txt')
+    if not os.path.exists(config_path):
+        return None
+    pattern = re.compile(r'^\s*num_hypotheses\s*:\s*(\d+)\s*$')
+    with open(config_path, 'r') as f_cfg:
+        for line in f_cfg:
+            match = pattern.match(line.strip())
+            if match:
+                return int(match.group(1))
+    return None
+
+
+def save_run_artifacts(run_dir, run_config, run_metrics, intent_model_path, speed_model_path, traj_model_path,
+                       num_hypotheses_from_model=None):
     if not os.path.exists(run_dir):
         os.makedirs(run_dir)
 
+    run_config_snapshot = dict(run_config)
+    run_config_snapshot['num_hypotheses_from_model'] = num_hypotheses_from_model
+
     with open(os.path.join(run_dir, 'config_snapshot.json'), 'w') as f_cfg:
-        json.dump(run_config, f_cfg, indent=2, sort_keys=True)
+        json.dump(run_config_snapshot, f_cfg, indent=2, sort_keys=True)
 
     with open(os.path.join(run_dir, 'metrics.json'), 'w') as f_met:
         json.dump(run_metrics, f_met, indent=2, sort_keys=True)
@@ -160,6 +180,31 @@ def write_summary_table(rows, output_dir):
     with open(json_path, 'w') as f_json:
         json.dump(rows, f_json, indent=2, sort_keys=True)
     return csv_path, json_path
+
+
+def validate_trajectory_paths(ks, traj_model_path_map):
+    unique_paths = {}
+    for k in ks:
+        if k not in traj_model_path_map:
+            raise ValueError('Missing trajectory model path mapping for K={}'.format(k))
+        model_path = traj_model_path_map[k]
+        if not model_path:
+            raise ValueError('Empty trajectory model path for K={}'.format(k))
+        real_path = os.path.realpath(model_path)
+        if real_path in unique_paths:
+            raise ValueError('Trajectory model paths must be independent directories, but K={} and K={} '
+                             'both map to {}'.format(unique_paths[real_path], k, model_path))
+        unique_paths[real_path] = k
+
+
+def run_consistency_check(row):
+    expected_k = row.get('K')
+    from_model = row.get('num_hypotheses_from_model')
+    if from_model is None:
+        return False, 'Missing num_hypotheses_from_model in checkpoint config'
+    if from_model != expected_k:
+        return False, 'K={} but checkpoint config num_hypotheses={}'.format(expected_k, from_model)
+    return True, ''
 
 
 def train_predict(dataset='pie',
@@ -329,9 +374,9 @@ def main(dataset='pie', train_test=2, batch_size=64,
          protocol='quick', quick_max_tracks=512,
          intent_model_path='data/pie/intention/context_loc_pretrained',
          speed_model_path='data/pie/speed/speed_pretrained',
-         traj_model_path_k1='data/pie/trajectory/loc_intent_speed_pretrained',
-         traj_model_path_k5='data/pie/trajectory/loc_intent_speed_pretrained',
-         traj_model_path_k10='data/pie/trajectory/loc_intent_speed_pretrained',
+         traj_model_path_k1='',
+         traj_model_path_k5='',
+         traj_model_path_k10='',
          eval_output_dir='data/pie/eval_reports'):
 
       if protocol == 'quick':
@@ -342,8 +387,17 @@ def main(dataset='pie', train_test=2, batch_size=64,
           max_tracks = None
 
       rows = []
+      invalid_rows = []
       traj_model_path_map = {1: traj_model_path_k1, 5: traj_model_path_k5, 10: traj_model_path_k10}
       model_name_map = {1: 'baseline', 5: 'multi-future', 10: 'multi-future'}
+      validate_trajectory_paths(ks, traj_model_path_map)
+
+      path_hypothesis_map = {}
+      for k, model_path in traj_model_path_map.items():
+          if k in ks:
+              path_hypothesis_map[k] = read_num_hypotheses_from_model(model_path)
+              print('Trajectory checkpoint K={} path={} config num_hypotheses={}'.format(
+                  k, model_path, path_hypothesis_map[k]))
 
       for seed in seeds:
           set_global_seed(seed)
@@ -355,6 +409,7 @@ def main(dataset='pie', train_test=2, batch_size=64,
                                                           max_tracks=max_tracks)
           for k in ks:
               traj_model_path = traj_model_path_map[k]
+              num_hypotheses_from_model = path_hypothesis_map.get(k)
               model_name = model_name_map.get(k, 'model-k{}'.format(k))
               print('Trajectory num_hypotheses (K): {}'.format(k))
               t_metrics = train_predict(dataset=dataset,
@@ -379,8 +434,18 @@ def main(dataset='pie', train_test=2, batch_size=64,
                          'AUC': intent_metrics.get('AUC'),
                          'MSE': t_metrics.get('mse-45'),
                          'ADE': t_metrics.get('ade'),
-                         'FDE': t_metrics.get('fde')}
-                  rows.append(row)
+                         'FDE': t_metrics.get('fde'),
+                         'traj_model_path': traj_model_path,
+                         'num_hypotheses_from_model': num_hypotheses_from_model}
+                  is_valid, invalid_reason = run_consistency_check(row)
+                  row['consistency_valid'] = is_valid
+                  row['consistency_message'] = invalid_reason
+                  if is_valid:
+                      rows.append(row)
+                  else:
+                      invalid_rows.append(row)
+                      print('WARNING: Invalid run removed from report (seed={}, K={}): {}'.format(
+                          seed, k, invalid_reason))
 
                   run_dir = os.path.join(eval_output_dir, protocol, 'K{}_seed{}'.format(k, seed))
                   run_config = {'dataset': dataset,
@@ -393,13 +458,16 @@ def main(dataset='pie', train_test=2, batch_size=64,
                                 'max_tracks': max_tracks,
                                 'intent_model_path': intent_path_seed,
                                 'speed_model_path': speed_model_path,
-                                'traj_model_path': traj_model_path}
+                                'traj_model_path': traj_model_path,
+                                'consistency_valid': is_valid,
+                                'consistency_message': invalid_reason}
                   save_run_artifacts(run_dir=run_dir,
                                      run_config=run_config,
                                      run_metrics=row,
                                      intent_model_path=intent_path_seed,
                                      speed_model_path=speed_model_path,
-                                     traj_model_path=traj_model_path)
+                                     traj_model_path=traj_model_path,
+                                     num_hypotheses_from_model=num_hypotheses_from_model)
 
       if rows:
           csv_path, json_path = write_eval_table(rows, os.path.join(eval_output_dir, protocol))
@@ -409,6 +477,11 @@ def main(dataset='pie', train_test=2, batch_size=64,
           print('Saved evaluation table: {}'.format(json_path))
           print('Saved aggregate table (mean/std): {}'.format(summary_csv_path))
           print('Saved aggregate table (mean/std): {}'.format(summary_json_path))
+      if invalid_rows:
+          invalid_csv_path, invalid_json_path = write_eval_table(
+              invalid_rows, os.path.join(eval_output_dir, protocol, 'invalid_runs'))
+          print('Saved invalid run table: {}'.format(invalid_csv_path))
+          print('Saved invalid run table: {}'.format(invalid_json_path))
 
 
 if __name__ == '__main__':
@@ -430,9 +503,12 @@ if __name__ == '__main__':
                         help='Max number of tracks used per split in quick protocol.')
     parser.add_argument('--intent_model_path', type=str, default='data/pie/intention/context_loc_pretrained')
     parser.add_argument('--speed_model_path', type=str, default='data/pie/speed/speed_pretrained')
-    parser.add_argument('--traj_model_path_k1', type=str, default='data/pie/trajectory/loc_intent_speed_pretrained')
-    parser.add_argument('--traj_model_path_k5', type=str, default='data/pie/trajectory/loc_intent_speed_pretrained')
-    parser.add_argument('--traj_model_path_k10', type=str, default='data/pie/trajectory/loc_intent_speed_pretrained')
+    parser.add_argument('--traj_model_path_k1', type=str, required=True,
+                        help='Trajectory checkpoint directory for K=1 (must be an independent path).')
+    parser.add_argument('--traj_model_path_k5', type=str, required=True,
+                        help='Trajectory checkpoint directory for K=5 (must be an independent path).')
+    parser.add_argument('--traj_model_path_k10', type=str, required=True,
+                        help='Trajectory checkpoint directory for K=10 (must be an independent path).')
     parser.add_argument('--eval_output_dir', type=str, default='data/pie/eval_reports')
 
     args = parser.parse_args()
