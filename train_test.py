@@ -24,6 +24,7 @@ import argparse
 import csv
 import json
 import random
+import shutil
 import numpy as np
 
 from pie_intent import PIEIntent
@@ -39,9 +40,90 @@ from prettytable import PrettyTable
 dim_ordering = K.image_dim_ordering()
 
 
+def parse_int_list(arg_value, default_values):
+    if arg_value is None:
+        return list(default_values)
+    values = [v.strip() for v in str(arg_value).split(',') if v.strip()]
+    return [int(v) for v in values]
+
+
+def maybe_subset_sequence_data(sequence_data, max_tracks=None):
+    if not max_tracks:
+        return sequence_data
+    subset = {}
+    for key, values in sequence_data.items():
+        if isinstance(values, list):
+            subset[key] = values[:max_tracks]
+        else:
+            subset[key] = values
+    return subset
+
+
+def summarize_metrics(rows):
+    groups = {}
+    for row in rows:
+        group_key = (row.get('model_name'), row.get('K'))
+        groups.setdefault(group_key, []).append(row)
+
+    summary_rows = []
+    metric_keys = ['minADE', 'minFDE', 'MSE', 'ADE', 'FDE', 'F1', 'AUC']
+    for (model_name, k), group_rows in sorted(groups.items(), key=lambda x: x[0][1]):
+        summary = {'model_name': model_name, 'K': k, 'num_runs': len(group_rows)}
+        for metric_key in metric_keys:
+            values = [r[metric_key] for r in group_rows if r.get(metric_key) is not None]
+            if values:
+                summary['%s_mean' % metric_key] = float(np.mean(values))
+                summary['%s_std' % metric_key] = float(np.std(values, ddof=0))
+            else:
+                summary['%s_mean' % metric_key] = None
+                summary['%s_std' % metric_key] = None
+        summary_rows.append(summary)
+    return summary_rows
+
+
+def copy_if_exists(src, dst):
+    if src and os.path.exists(src):
+        shutil.copy2(src, dst)
+        return True
+    return False
+
+
+def save_run_artifacts(run_dir, run_config, run_metrics, intent_model_path, speed_model_path, traj_model_path):
+    if not os.path.exists(run_dir):
+        os.makedirs(run_dir)
+
+    with open(os.path.join(run_dir, 'config_snapshot.json'), 'w') as f_cfg:
+        json.dump(run_config, f_cfg, indent=2, sort_keys=True)
+
+    with open(os.path.join(run_dir, 'metrics.json'), 'w') as f_met:
+        json.dump(run_metrics, f_met, indent=2, sort_keys=True)
+
+    ckpt_dir = os.path.join(run_dir, 'best_checkpoints')
+    if not os.path.exists(ckpt_dir):
+        os.makedirs(ckpt_dir)
+
+    copied = {}
+    for name, model_path in [('intent', intent_model_path), ('speed', speed_model_path), ('trajectory', traj_model_path)]:
+        model_ckpt = os.path.join(model_path, 'model.h5') if model_path else ''
+        target = os.path.join(ckpt_dir, '%s_model.h5' % name)
+        copied[name] = copy_if_exists(model_ckpt, target)
+
+    with open(os.path.join(run_dir, 'checkpoint_manifest.json'), 'w') as f_ckpt:
+        json.dump(copied, f_ckpt, indent=2, sort_keys=True)
+
+
 def set_global_seed(seed):
     random.seed(seed)
     np.random.seed(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+        torch.backends.cudnn.deterministic = True
+        torch.backends.cudnn.benchmark = False
+    except ImportError:
+        pass
     try:
         tf.set_random_seed(seed)
     except AttributeError:
@@ -64,6 +146,22 @@ def write_eval_table(rows, output_dir):
     return csv_path, json_path
 
 
+def write_summary_table(rows, output_dir):
+    if not os.path.exists(output_dir):
+        os.makedirs(output_dir)
+    csv_path = os.path.join(output_dir, 'evaluation_summary_mean_std.csv')
+    json_path = os.path.join(output_dir, 'evaluation_summary_mean_std.json')
+    fields = sorted(set(k for row in rows for k in row.keys()))
+    with open(csv_path, 'w') as f_csv:
+        writer = csv.DictWriter(f_csv, fieldnames=fields)
+        writer.writeheader()
+        for row in rows:
+            writer.writerow(row)
+    with open(json_path, 'w') as f_json:
+        json.dump(rows, f_json, indent=2, sort_keys=True)
+    return csv_path, json_path
+
+
 def train_predict(dataset='pie',
                   train_test=2,
                   intent_model_path='data/pie/intention/context_loc_pretrained',
@@ -71,7 +169,8 @@ def train_predict(dataset='pie',
                   speed_model_path='data/pie/speed/speed_pretrained',
                   num_hypotheses=5,
                   batch_size=64,
-                  eval_split='test'):
+                  eval_split='test',
+                  max_tracks=None):
     data_opts = {'fstride': 1,
                  'sample_type': 'all',
                  'height_rng': [0, float('inf')],
@@ -112,11 +211,14 @@ def train_predict(dataset='pie',
     if train_test < 2:
         beh_seq_val = imdb.generate_data_trajectory_sequence('val', **data_opts)
         beh_seq_train = imdb.generate_data_trajectory_sequence('train', **data_opts)
+        beh_seq_val = maybe_subset_sequence_data(beh_seq_val, max_tracks=max_tracks)
+        beh_seq_train = maybe_subset_sequence_data(beh_seq_train, max_tracks=max_tracks)
         traj_model_path = t_traj.train(beh_seq_train, beh_seq_val, batch_size=batch_size, **traj_model_opts)
         speed_model_path = t_speed.train(beh_seq_train, beh_seq_val, batch_size=batch_size, **speed_model_opts)
 
     if train_test > 0:
         beh_seq_test = imdb.generate_data_trajectory_sequence(eval_split, **data_opts)
+        beh_seq_test = maybe_subset_sequence_data(beh_seq_test, max_tracks=max_tracks)
 
         perf_final = t_traj.test_final(beh_seq_test,
                                        traj_model_path=traj_model_path,
@@ -140,7 +242,8 @@ def train_predict(dataset='pie',
 #train_test = 0 (train only), 1 (train-test), 2 (test only)
 def train_intent(train_test=1,
                  model_path='data/pie/intention/context_loc_pretrained',
-                 eval_split='test'):
+                 eval_split='test',
+                 max_tracks=None):
 
     data_opts = {'fstride': 1,
             'sample_type': 'all', 
@@ -176,9 +279,11 @@ def train_intent(train_test=1,
 
     if train_test < 2:  # Train
         beh_seq_val = imdb.generate_data_trajectory_sequence('val', **data_opts)
+        beh_seq_val = maybe_subset_sequence_data(beh_seq_val, max_tracks=max_tracks)
         beh_seq_val = imdb.balance_samples_count(beh_seq_val, label_type='intention_binary')
 
         beh_seq_train = imdb.generate_data_trajectory_sequence('train', **data_opts)
+        beh_seq_train = maybe_subset_sequence_data(beh_seq_train, max_tracks=max_tracks)
         beh_seq_train = imdb.balance_samples_count(beh_seq_train, label_type='intention_binary')
 
         saved_files_path = t.train(data_train=beh_seq_train,
@@ -197,6 +302,7 @@ def train_intent(train_test=1,
         if saved_files_path == '':
             saved_files_path = pretrained_model_path
         beh_seq_test = imdb.generate_data_trajectory_sequence(eval_split, **data_opts)
+        beh_seq_test = maybe_subset_sequence_data(beh_seq_test, max_tracks=max_tracks)
         acc, f1, auc = t.test_chunk(beh_seq_test, data_opts, saved_files_path, False)
         
         t = PrettyTable(['Acc', 'F1', 'AUC'])
@@ -211,8 +317,9 @@ def train_intent(train_test=1,
     return saved_files_path, metrics
 
 
-def main(dataset='pie', train_test=2, num_hypotheses=5, batch_size=64,
-         seed=42, eval_split='val',
+def main(dataset='pie', train_test=2, batch_size=64,
+         seeds=(42, 43, 44), ks=(1, 5, 10),
+         protocol='quick', quick_max_tracks=512,
          intent_model_path='data/pie/intention/context_loc_pretrained',
          speed_model_path='data/pie/speed/speed_pretrained',
          traj_model_path_k1='data/pie/trajectory/loc_intent_speed_pretrained',
@@ -220,41 +327,81 @@ def main(dataset='pie', train_test=2, num_hypotheses=5, batch_size=64,
          traj_model_path_k10='data/pie/trajectory/loc_intent_speed_pretrained',
          eval_output_dir='data/pie/eval_reports'):
 
-      set_global_seed(seed)
-      intent_model_path, intent_metrics = train_intent(train_test=train_test,
-                                                       model_path=intent_model_path,
-                                                       eval_split=eval_split)
+      if protocol == 'quick':
+          eval_split = 'val'
+          max_tracks = quick_max_tracks
+      else:
+          eval_split = 'test'
+          max_tracks = None
+
       rows = []
-      traj_models = [('baseline', 1, traj_model_path_k1),
-                     ('multi-future', 5, traj_model_path_k5),
-                     ('multi-future', 10, traj_model_path_k10)]
-      for model_name, k, traj_model_path in traj_models:
-          print('Trajectory num_hypotheses (K): {}'.format(k))
-          t_metrics = train_predict(dataset=dataset,
-                                    train_test=train_test,
-                                    intent_model_path=intent_model_path,
-                                    traj_model_path=traj_model_path,
-                                    speed_model_path=speed_model_path,
-                                    num_hypotheses=k,
-                                    batch_size=batch_size,
-                                    eval_split=eval_split)
-          if train_test > 0 and t_metrics is not None:
-              row = {'model_name': model_name,
-                     'K': k,
-                     'seed': seed,
-                     'minADE': t_metrics.get('minADE'),
-                     'minFDE': t_metrics.get('minFDE'),
-                     'F1': intent_metrics.get('F1'),
-                     'AUC': intent_metrics.get('AUC'),
-                     'MSE': t_metrics.get('mse-45'),
-                     'ADE': t_metrics.get('ade'),
-                     'FDE': t_metrics.get('fde')}
-              rows.append(row)
+      traj_model_path_map = {1: traj_model_path_k1, 5: traj_model_path_k5, 10: traj_model_path_k10}
+      model_name_map = {1: 'baseline', 5: 'multi-future', 10: 'multi-future'}
+
+      for seed in seeds:
+          set_global_seed(seed)
+          print('Running seed={} protocol={} eval_split={} max_tracks={}'.format(seed, protocol, eval_split, max_tracks))
+
+          intent_path_seed, intent_metrics = train_intent(train_test=train_test,
+                                                          model_path=intent_model_path,
+                                                          eval_split=eval_split,
+                                                          max_tracks=max_tracks)
+          for k in ks:
+              traj_model_path = traj_model_path_map[k]
+              model_name = model_name_map.get(k, 'model-k{}'.format(k))
+              print('Trajectory num_hypotheses (K): {}'.format(k))
+              t_metrics = train_predict(dataset=dataset,
+                                        train_test=train_test,
+                                        intent_model_path=intent_path_seed,
+                                        traj_model_path=traj_model_path,
+                                        speed_model_path=speed_model_path,
+                                        num_hypotheses=k,
+                                        batch_size=batch_size,
+                                        eval_split=eval_split,
+                                        max_tracks=max_tracks)
+              if train_test > 0 and t_metrics is not None:
+                  row = {'model_name': model_name,
+                         'protocol': protocol,
+                         'eval_split': eval_split,
+                         'K': k,
+                         'seed': seed,
+                         'max_tracks': max_tracks,
+                         'minADE': t_metrics.get('minADE'),
+                         'minFDE': t_metrics.get('minFDE'),
+                         'F1': intent_metrics.get('F1'),
+                         'AUC': intent_metrics.get('AUC'),
+                         'MSE': t_metrics.get('mse-45'),
+                         'ADE': t_metrics.get('ade'),
+                         'FDE': t_metrics.get('fde')}
+                  rows.append(row)
+
+                  run_dir = os.path.join(eval_output_dir, protocol, 'K{}_seed{}'.format(k, seed))
+                  run_config = {'dataset': dataset,
+                                'train_test': train_test,
+                                'batch_size': batch_size,
+                                'seed': seed,
+                                'K': k,
+                                'protocol': protocol,
+                                'eval_split': eval_split,
+                                'max_tracks': max_tracks,
+                                'intent_model_path': intent_path_seed,
+                                'speed_model_path': speed_model_path,
+                                'traj_model_path': traj_model_path}
+                  save_run_artifacts(run_dir=run_dir,
+                                     run_config=run_config,
+                                     run_metrics=row,
+                                     intent_model_path=intent_path_seed,
+                                     speed_model_path=speed_model_path,
+                                     traj_model_path=traj_model_path)
 
       if rows:
-          csv_path, json_path = write_eval_table(rows, eval_output_dir)
+          csv_path, json_path = write_eval_table(rows, os.path.join(eval_output_dir, protocol))
+          summary_rows = summarize_metrics(rows)
+          summary_csv_path, summary_json_path = write_summary_table(summary_rows, os.path.join(eval_output_dir, protocol))
           print('Saved evaluation table: {}'.format(csv_path))
           print('Saved evaluation table: {}'.format(json_path))
+          print('Saved aggregate table (mean/std): {}'.format(summary_csv_path))
+          print('Saved aggregate table (mean/std): {}'.format(summary_json_path))
 
 
 if __name__ == '__main__':
@@ -262,14 +409,16 @@ if __name__ == '__main__':
     parser.add_argument('--dataset', type=str, default='pie')
     parser.add_argument('--train_test', type=int, default=2,
                         help='0 - train only, 1 - train and test, 2 - test only')
-    parser.add_argument('--num_hypotheses', type=int, default=5, choices=[5, 10],
-                        help='Number of trajectory hypotheses (K). Use K=5 by default to reduce OOM risk.')
     parser.add_argument('--batch_size', type=int, default=64,
                         help='Trajectory/speed training batch size. Reduce this if GPU OOM occurs.')
-    parser.add_argument('--seed', type=int, default=42,
-                        help='Random seed for reproducible testing/evaluation.')
-    parser.add_argument('--eval_split', type=str, default='val', choices=['train', 'val', 'test'],
-                        help='Data split used for reporting metrics.')
+    parser.add_argument('--seeds', type=str, default='42,43,44',
+                        help='Comma-separated random seeds for reproducible experiments, e.g., 42,43,44.')
+    parser.add_argument('--ks', type=str, default='1,5,10',
+                        help='Comma-separated K values for baseline and multi-future models, e.g., 1,5,10.')
+    parser.add_argument('--protocol', type=str, default='quick', choices=['quick', 'formal'],
+                        help='quick: reproducible subset on validation split; formal: full test split.')
+    parser.add_argument('--quick_max_tracks', type=int, default=512,
+                        help='Max number of tracks used per split in quick protocol.')
     parser.add_argument('--intent_model_path', type=str, default='data/pie/intention/context_loc_pretrained')
     parser.add_argument('--speed_model_path', type=str, default='data/pie/speed/speed_pretrained')
     parser.add_argument('--traj_model_path_k1', type=str, default='data/pie/trajectory/loc_intent_speed_pretrained')
@@ -280,10 +429,11 @@ if __name__ == '__main__':
     args = parser.parse_args()
     main(dataset=args.dataset,
          train_test=args.train_test,
-         num_hypotheses=args.num_hypotheses,
          batch_size=args.batch_size,
-         seed=args.seed,
-         eval_split=args.eval_split,
+         seeds=parse_int_list(args.seeds, [42, 43, 44]),
+         ks=parse_int_list(args.ks, [1, 5, 10]),
+         protocol=args.protocol,
+         quick_max_tracks=args.quick_max_tracks,
          intent_model_path=args.intent_model_path,
          speed_model_path=args.speed_model_path,
          traj_model_path_k1=args.traj_model_path_k1,
