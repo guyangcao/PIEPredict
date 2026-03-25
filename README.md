@@ -78,7 +78,7 @@ Download PIE data interface `pie_data.py` from [PIE github](https://github.com/a
 
 To train all models from scratch and evaluate them on the test data use this command:
 ```
-python train_test.py 1
+python train_test.py --train_test 1
 ```
 This will train intention, speed and trajectory models separately and evaluate them on the test data.
 
@@ -104,6 +104,12 @@ python train_test.py --train_test 2 --protocol quick --seeds 42,43,44 --ks 1,5,1
 
 # Formal final evaluation (full test split)
 python train_test.py --train_test 2 --protocol formal --seeds 42,43,44 --ks 1,5,10
+```
+
+If you use the defaults (`--protocol quick --seeds 42,43,44 --ks 1,5,10`), you can omit them:
+
+```bash
+python train_test.py --train_test 2
 ```
 
 For each `(seed, K)` run, artifacts are stored under:
@@ -150,7 +156,7 @@ python scripts/validate_report_traceability.py   --summary-csv data/pie/eval_rep
 To reproduce the results of our best model which combines pedestrian intention and vehicle speed for pedestrian trajectory prediction run this command:
 
 ```
-python train_test.py 2
+python train_test.py --train_test 2
 ```
 
 <a name="citation"></a>
