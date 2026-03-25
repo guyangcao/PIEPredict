@@ -467,6 +467,9 @@ class PIEPredict(object):
             c_performance = np.square(centers - res_centers)
             perf['center_mse'] = c_performance.mean(axis=None)
             perf['center_mse_last'] = c_performance[:, -1, :].mean(axis=None)
+            center_dist = np.linalg.norm(centers - res_centers, axis=2)
+            perf['ade'] = center_dist.mean(axis=None)
+            perf['fde'] = center_dist[:, -1].mean(axis=None)
 
             # # print("Center MSE  %f" % perf['center_mse'])
             # print("c-mse-15: %.2f\nc-mse-30: %.2f\nc-mse-45: %.2f"
@@ -619,6 +622,12 @@ class PIEPredict(object):
         perf['c-mse-30'] = c_performance[:, 0:30, :].mean(axis=None)  # 0:30
         perf['c-mse-45'] = c_performance.mean(axis=None)
         perf['c-mse-last'] = c_performance[:, -1, :].mean(axis=None)
+        center_dist = np.linalg.norm(centers - res_centers, axis=2)
+        perf['ade'] = center_dist.mean(axis=None)
+        perf['fde'] = center_dist[:, -1].mean(axis=None)
+        perf.update(self.compute_multi_hypothesis_metrics(test_results,
+                                                          test_target_data_org,
+                                                          test_obs_data_org[0][:, 0, 0:4]))
 
         # print("c-mse-15: %.2f\nc-mse-30: %.2f\nc-mse-45: %.2f" \
         #       % (perf['c-mse-15'], perf['c-mse-30'], perf['c-mse-45']))
@@ -838,8 +847,42 @@ class PIEPredict(object):
         perf['c-mse-30'] = c_performance[:, 0:30, :].mean(axis=None)
         perf['c-mse-45'] = c_performance.mean(axis=None)
         perf['c-mse-last'] = c_performance[:, -1, :].mean(axis=None)
+        center_dist = np.linalg.norm(centers - res_centers, axis=2)
+        perf['ade'] = center_dist.mean(axis=None)
+        perf['fde'] = center_dist[:, -1].mean(axis=None)
+        perf.update(self.compute_multi_hypothesis_metrics(test_results,
+                                                          test_target_data_org,
+                                                          test_obs_data_org[0][:, 0, 0:4]))
     
         return perf, test_results, box_data
+
+    @staticmethod
+    def compute_multi_hypothesis_metrics(predictions, gt_bbox_abs, obs_bbox_anchor):
+        pred = predictions
+        if pred.ndim == 3:
+            pred = np.expand_dims(pred, axis=1)
+
+        pred_abs = pred + obs_bbox_anchor[:, None, None, :]
+        gt_centers = np.stack([(gt_bbox_abs[:, :, 0] + gt_bbox_abs[:, :, 2]) * 0.5,
+                               (gt_bbox_abs[:, :, 1] + gt_bbox_abs[:, :, 3]) * 0.5], axis=2)
+        pred_centers = np.stack([(pred_abs[:, :, :, 0] + pred_abs[:, :, :, 2]) * 0.5,
+                                 (pred_abs[:, :, :, 1] + pred_abs[:, :, :, 3]) * 0.5], axis=3)
+
+        diff = pred_centers - gt_centers[:, None, :, :]
+        dists = np.linalg.norm(diff, axis=3)
+        ade_sample_k = np.mean(dists, axis=2)
+        fde_sample_k = dists[:, :, -1]
+        ade_k = np.mean(ade_sample_k, axis=0)
+        fde_k = np.mean(fde_sample_k, axis=0)
+
+        metrics = {}
+        for i in range(ade_k.shape[0]):
+            metrics['ADE_{}'.format(i + 1)] = float(ade_k[i])
+            metrics['FDE_{}'.format(i + 1)] = float(fde_k[i])
+
+        metrics['minADE'] = float(np.mean(np.min(ade_sample_k, axis=1)))
+        metrics['minFDE'] = float(np.mean(np.min(fde_sample_k, axis=1)))
+        return metrics
 
     def pie_encdec(self):
         """
