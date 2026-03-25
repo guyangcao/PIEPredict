@@ -35,7 +35,7 @@ from keras.layers import Dense
 from keras.layers import Flatten
 from keras.layers import Input
 from keras.layers import RepeatVector
-from keras.layers.recurrent import LSTM
+from keras.layers import LSTM
 from keras.models import Model
 from keras.models import load_model
 from keras.optimizers import RMSprop
@@ -50,7 +50,7 @@ from utils import *
 #from utilities.jaad_utilities import *
 #from utilities.train_utilities import *
 
-K.set_image_dim_ordering('tf')
+K.set_image_data_format('channels_last')
 
 
 class PIEIntent(object):
